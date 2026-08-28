@@ -1,14 +1,21 @@
 FROM python:3.10-slim
 
+# Install system dependencies for Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install fastapi uvicorn playwright requests python-dotenv
+# Install Python packages
+RUN pip install playwright requests python-dotenv
+
+# Install Chromium and system dependencies
 RUN playwright install chromium && playwright install-deps
 
 WORKDIR /app
-COPY publicapi.py /app/publicapi.py
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000"]
+# Copy the worker script
+COPY publicapi.py /app/worker.py
+
+# Run the worker (continuous loop)
+CMD ["python", "-u", "worker.py"]
