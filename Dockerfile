@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip install playwright requests python-dotenv
+RUN pip install playwright requests python-dotenv fastapi uvicorn
 
 # Install Chromium and system dependencies
 RUN playwright install chromium && playwright install-deps
