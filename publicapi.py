@@ -275,7 +275,7 @@ def root():
 
 @app.get("/scrape")
 def scrape_gstin(
-    gstin: str = Query(..., min_length=15, max_length=15, regex="^[A-Z0-9]{15}$"),
+    gstin: str = Query(..., min_length=15, max_length=15, pattern="^[A-Z0-9]{15}$"),
     api_key: str = Depends(verify_api_key)
 ):
     """
