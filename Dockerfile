@@ -9,6 +9,9 @@ RUN pip install fastapi uvicorn playwright requests python-dotenv
 RUN playwright install chromium && playwright install-deps
 
 WORKDIR /app
-COPY publicapi.py /app/worker.py   # or main.py
 
+# Copy your FastAPI script (publicapi.py) as worker.py inside the container
+COPY publicapi.py /app/worker.py
+
+# Start the Uvicorn server
 CMD ["uvicorn", "worker:app", "--host", "0.0.0.0", "--port", "3000"]
