@@ -3,7 +3,6 @@ import json
 import time
 import base64
 import requests
-import sys
 from fastapi import FastAPI, HTTPException, Query, Header, Depends
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
@@ -16,14 +15,14 @@ API_KEY_2CAPTCHA = os.getenv('API_KEY_2CAPTCHA')
 if not API_KEY_2CAPTCHA:
     raise ValueError("❌ Missing API_KEY_2CAPTCHA")
 
-API_KEY = os.getenv('API_KEY')  # <-- Your API key for this service
+API_KEY = os.getenv('API_KEY')          # Used for authenticating requests to this service
 if not API_KEY:
     raise ValueError("❌ Missing API_KEY for authentication")
 
 # ---------- App ----------
-app = FastAPI(title="GST Scraper API")
+app = FastAPI(title="GST Information API")
 
-# ---------- Captcha Solver (original, reliable) ----------
+# ---------- Captcha Solver (unchanged) ----------
 def solve_captcha(b64_image, api_key):
     print("   ⏳ Sending screenshot to 2Captcha...")
     payload = {
@@ -49,11 +48,11 @@ def solve_captcha(b64_image, api_key):
             raise Exception(f"2Captcha error: {poll['request']}")
     raise Exception("Timeout waiting for captcha solution.")
 
-# ---------- Scraper Class (headless, retries) ----------
-class GSTSearchScraper:
-    def __init__(self, gstin, api_key):
+# ---------- Data Fetcher Class (formerly GSTSearchScraper) ----------
+class GSTDataFetcher:
+    def __init__(self, gstin, captcha_api_key):
         self.gstin = gstin.strip()
-        self.api_key = api_key
+        self.captcha_api_key = captcha_api_key
 
     def _get_text(self, element):
         try:
@@ -175,13 +174,14 @@ class GSTSearchScraper:
             print(f"   ❌ Failed to extract filing data: {e}")
             return filing_data
 
-    def run(self):
+    def fetch(self):
+        """Main method: retrieves GST details and filing history for the given GSTIN."""
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             print(f"\n🔍 Processing GSTIN: {self.gstin} (Attempt {attempt}/{max_attempts})")
             with sync_playwright() as p:
                 browser = p.chromium.launch(
-                    headless=True,          # <-- Cloud mode
+                    headless=True,
                     args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
                 )
                 context = browser.new_context(
@@ -200,7 +200,7 @@ class GSTSearchScraper:
                     captcha_element = page.locator('div[data-captcha] img#imgCaptcha')
                     img_bytes = captcha_element.screenshot(type='png')
                     b64_image = base64.b64encode(img_bytes).decode('utf-8')
-                    captcha_text = solve_captcha(b64_image, self.api_key)
+                    captcha_text = solve_captcha(b64_image, self.captcha_api_key)
                     print(f"   ✅ Solved: {captcha_text}")
                     page.fill('#fo-captcha', captcha_text)
 
@@ -231,7 +231,7 @@ class GSTSearchScraper:
                         "businessDetails": details,
                         "filingData": filing_data
                     }
-                    print(f"   ✅ Successfully scraped data for {self.gstin}")
+                    print(f"   ✅ Successfully retrieved data for {self.gstin}")
                     return result
 
                 except Exception as e:
@@ -243,11 +243,11 @@ class GSTSearchScraper:
                         return None
                 finally:
                     browser.close()
-        print(f"❌ Failed to scrape {self.gstin} after {max_attempts} attempts.")
+        print(f"❌ Failed to retrieve data for {self.gstin} after {max_attempts} attempts.")
         return None
 
 # ---------- Data Storage ----------
-DATA_FILE = "scraped_data.json"
+DATA_FILE = "gst_data.json"
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -263,7 +263,7 @@ def save_data(data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 # ---------- Authentication ----------
-def verify_api_key(api_key: str = Header(...)):
+def verify_api_key(api_key: str = Header(..., alias="X-API-Key")):
     if api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
     return api_key
@@ -271,24 +271,23 @@ def verify_api_key(api_key: str = Header(...)):
 # ---------- Endpoints ----------
 @app.get("/")
 def root():
-    return {"message": "GST Scraper API is running. Use GET /scrape?gstin=..."}
+    return {"message": "GST Information API is running. Use /gstin?gstin=... to look up a GSTIN."}
 
-@app.get("/scrape")
-def scrape_gstin(
+@app.get("/gstin")
+def get_gstin_details(
     gstin: str = Query(..., min_length=15, max_length=15, pattern="^[A-Z0-9]{15}$"),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Scrape GST details for a single GSTIN.
-    Returns the scraped data and stores it in scraped_data.json.
+    Retrieve full GST details and filing history for a single GSTIN.
+    The result is stored in the local JSON store.
     """
-    scraper = GSTSearchScraper(gstin, API_KEY_2CAPTCHA)
-    result = scraper.run()
+    fetcher = GSTDataFetcher(gstin, API_KEY_2CAPTCHA)
+    result = fetcher.fetch()
     
     if result is None:
-        raise HTTPException(status_code=404, detail="Scraping failed or GSTIN not found")
+        raise HTTPException(status_code=404, detail="GSTIN not found or data retrieval failed")
     
-    # Store in JSON file
     data = load_data()
     data[gstin] = {
         "timestamp": time.time(),
@@ -302,28 +301,27 @@ def scrape_gstin(
         "data": result
     }
 
-@app.get("/scrape/bulk")
-def scrape_bulk(
-    gstins: List[str] = Query(..., min_items=1, max_items=10),  # limit to avoid overload
+@app.get("/bulk")
+def get_bulk_gstin_details(
+    gstins: List[str] = Query(..., min_items=1, max_items=10),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Scrape multiple GSTINs (max 10 per request).
-    Returns a summary and stores all successfully scraped results.
+    Retrieve details for multiple GSTINs (max 10 per request).
+    Already stored GSTINs are skipped; only new ones are fetched.
     """
     results = {}
     failed = []
     data = load_data()
     
     for gstin in gstins:
-        # Skip if already present? You can remove this check if you want to force refresh.
         if gstin in data:
-            print(f"⏩ Skipping {gstin} – already scraped.")
-            results[gstin] = "already scraped"
+            print(f"⏩ Skipping {gstin} – already stored.")
+            results[gstin] = "already stored"
             continue
         
-        scraper = GSTSearchScraper(gstin, API_KEY_2CAPTCHA)
-        result = scraper.run()
+        fetcher = GSTDataFetcher(gstin, API_KEY_2CAPTCHA)
+        result = fetcher.fetch()
         if result:
             data[gstin] = {
                 "timestamp": time.time(),
@@ -342,14 +340,14 @@ def scrape_bulk(
     }
 
 @app.get("/data")
-def get_all_data(api_key: str = Depends(verify_api_key)):
-    """Return all stored scraped data."""
+def get_all_stored_data(api_key: str = Depends(verify_api_key)):
+    """Return all stored GST data."""
     return load_data()
 
 @app.get("/data/{gstin}")
-def get_gstin_data(gstin: str, api_key: str = Depends(verify_api_key)):
+def get_stored_gstin_data(gstin: str, api_key: str = Depends(verify_api_key)):
     """Return stored data for a specific GSTIN."""
     data = load_data()
     if gstin not in data:
-        raise HTTPException(status_code=404, detail="GSTIN not found")
+        raise HTTPException(status_code=404, detail="GSTIN not found in storage")
     return data[gstin]
